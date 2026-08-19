@@ -17,4 +17,6 @@ nodeLinker: isolated
 # Having multiple prettiers makes the vscode extension unpredictable
 overrides:
   "prettier": "^3.8.1"
+patchedDependencies:
+  '@lingui-solid/solid@5.1.4': patches/@lingui-solid__solid@5.1.4.patch
 strictPeerDependencies: false

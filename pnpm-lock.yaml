@@ -7,6 +7,9 @@ settings:
 overrides:
   prettier: ^3.8.1
 
+patchedDependencies:
+  '@lingui-solid/solid@5.1.4': 95d66f48a83d003d6681bd5b0b8ad745a39ed2ac6f49982e41f074880155adf0
+
 importers:
 
   .:
@@ -136,7 +139,7 @@ importers:
         version: 1.2.2
       '@lingui-solid/solid':
         specifier: ^5.1.4
-        version: 5.1.4(@lingui-solid/babel-plugin-lingui-macro@packages+js-lingui-solid+packages+babel-plugin-lingui-macro)(@lingui/core@5.3.1(@lingui/babel-plugin-lingui-macro@5.3.1(babel-plugin-macros@3.1.0)(typescript@5.8.3))(babel-plugin-macros@3.1.0))(babel-plugin-macros@3.1.0)(solid-js@1.9.6)
+        version: 5.1.4(patch_hash=95d66f48a83d003d6681bd5b0b8ad745a39ed2ac6f49982e41f074880155adf0)(@lingui-solid/babel-plugin-lingui-macro@packages+js-lingui-solid+packages+babel-plugin-lingui-macro)(@lingui/core@5.3.1(@lingui/babel-plugin-lingui-macro@5.3.1(babel-plugin-macros@3.1.0)(typescript@5.8.3))(babel-plugin-macros@3.1.0))(babel-plugin-macros@3.1.0)(solid-js@1.9.6)
       '@livekit/components-core':
         specifier: ^0.12.14
         version: 0.12.14(livekit-client@2.20.2(@types/dom-mediacapture-record@1.0.22))(tslib@2.8.1)
@@ -9528,7 +9531,7 @@ snapshots:
       '@lezer/highlight': 1.2.2
       '@lezer/lr': 1.4.2
 
-  '@lingui-solid/solid@5.1.4(@lingui-solid/babel-plugin-lingui-macro@packages+js-lingui-solid+packages+babel-plugin-lingui-macro)(@lingui/core@5.3.1(@lingui/babel-plugin-lingui-macro@5.3.1(babel-plugin-macros@3.1.0)(typescript@5.8.3))(babel-plugin-macros@3.1.0))(babel-plugin-macros@3.1.0)(solid-js@1.9.6)':
+  '@lingui-solid/solid@5.1.4(patch_hash=95d66f48a83d003d6681bd5b0b8ad745a39ed2ac6f49982e41f074880155adf0)(@lingui-solid/babel-plugin-lingui-macro@packages+js-lingui-solid+packages+babel-plugin-lingui-macro)(@lingui/core@5.3.1(@lingui/babel-plugin-lingui-macro@5.3.1(babel-plugin-macros@3.1.0)(typescript@5.8.3))(babel-plugin-macros@3.1.0))(babel-plugin-macros@3.1.0)(solid-js@1.9.6)':
     dependencies:
       '@babel/runtime': 7.27.1
       '@lingui/core': 5.3.1(@lingui/babel-plugin-lingui-macro@5.3.1(babel-plugin-macros@3.1.0)(typescript@5.8.3))(babel-plugin-macros@3.1.0)
