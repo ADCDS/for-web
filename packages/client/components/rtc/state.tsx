@@ -81,6 +81,9 @@ class Voice {
   showBar: Accessor<boolean>;
   #setShowBar: Setter<boolean>;
 
+  /** Pending push-to-talk release, so brief key bounces don't clip speech */
+  #pttReleaseTimer: ReturnType<typeof setTimeout> | undefined;
+
   private sound: SoundController;
 
   private openModal;
@@ -111,6 +114,8 @@ class Voice {
 
     this.deafen = () => voiceSettings.deafen;
     this.microphone = () => voiceSettings.micOn && !voiceSettings.deafen;
+
+    this.#bindPushToTalk();
 
     const [video, setVideo] = createSignal(false);
     this.video = video;
@@ -180,6 +185,8 @@ class Voice {
           .setMicrophoneEnabled(this.#settings.micOn)
           .then((track) => {
             this.#settings.micOn = track != null;
+            // Arm push-to-talk: keep the track published but muted.
+            if (this.#settings.pushToTalk) this.applyPushToTalkMode();
             if (this.#settings.noiseSupression === "enhanced") {
               track?.audioTrack?.setProcessor(
                 new DenoiseTrackProcessor({
@@ -637,6 +644,166 @@ class Voice {
 
   get speakingPermission() {
     return !!this.channel()?.havePermission("Speak");
+  }
+
+  /**
+   * Wire up push-to-talk input sources.
+   *
+   * Two of them: DOM key events, which only fire while the app is focused, and
+   * an optional hook from the desktop shell that works globally (while a game
+   * has focus). Both funnel into setPushToTalkActive, which is idempotent, so
+   * it is fine for both to fire for the same press.
+   *
+   * Attached once for the lifetime of the app rather than per call: the
+   * handlers no-op unless push-to-talk is enabled and a room is connected.
+   */
+  #bindPushToTalk() {
+    if (typeof window === "undefined") return;
+
+    const isTyping = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null;
+      if (!el) return false;
+      return (
+        el.isContentEditable ||
+        el.tagName === "INPUT" ||
+        el.tagName === "TEXTAREA" ||
+        el.tagName === "SELECT"
+      );
+    };
+
+    window.addEventListener("keydown", (event) => {
+      if (!this.#settings.pushToTalk) return;
+      if (event.code !== this.#settings.pushToTalkKey) return;
+      // Holding a key autorepeats; only the first press matters.
+      if (event.repeat) return;
+      // Don't swallow the key while someone is writing a message.
+      if (isTyping(event.target)) return;
+      this.setPushToTalkActive(true);
+    });
+
+    window.addEventListener("keyup", (event) => {
+      if (!this.#settings.pushToTalk) return;
+      if (event.code !== this.#settings.pushToTalkKey) return;
+      this.setPushToTalkActive(false);
+    });
+
+    // If focus is lost mid-press the keyup never arrives and the mic would
+    // stay open indefinitely -- exactly the situation push-to-talk exists to
+    // prevent. Alt-tabbing into a game does this every time.
+    window.addEventListener("blur", () => {
+      if (!this.#settings.pushToTalk) return;
+      this.setPushToTalkActive(false);
+    });
+
+    window.native?.pushToTalk?.onChange((pressed) =>
+      this.setPushToTalkActive(pressed),
+    );
+  }
+
+  /**
+   * Whether the desktop shell can deliver key events while unfocused
+   */
+  get hasGlobalPushToTalk(): boolean {
+    return !!window.native?.pushToTalk;
+  }
+
+  /**
+   * Ask the desktop shell to bind the configured key globally
+   */
+  async syncPushToTalkBinding(): Promise<boolean> {
+    const binding = window.native?.pushToTalk;
+    if (!binding) return false;
+    try {
+      return await binding.setBinding(
+        this.#settings.pushToTalk ? this.#settings.pushToTalkKey : "",
+      );
+    } catch (e) {
+      this.onErr(e);
+      return false;
+    }
+  }
+
+  /**
+   * The published microphone track, if there is one
+   */
+  #micTrack() {
+    return this.room()?.localParticipant.getTrackPublication(
+      Track.Source.Microphone,
+    )?.track;
+  }
+
+  /**
+   * Start or stop transmitting.
+   *
+   * Mutes the already-published track rather than going through
+   * setMicrophoneEnabled, which renegotiates -- far too slow to sit between
+   * pressing a key and the first syllable.
+   */
+  async #setTransmitting(on: boolean) {
+    try {
+      const track = this.#micTrack();
+      if (!track) {
+        // Nothing published yet (e.g. mic was hard-muted). Publishing on the
+        // first press is slower but better than dropping the press entirely.
+        if (on) await this.room()?.localParticipant.setMicrophoneEnabled(true);
+        return;
+      }
+      await (on ? track.unmute() : track.mute());
+    } catch (e) {
+      this.onErr(e);
+    }
+  }
+
+  /**
+   * Called on key press (true) and release (false)
+   */
+  async setPushToTalkActive(active: boolean) {
+    if (!this.#settings.pushToTalk) return;
+    if (!this.room() || !this.speakingPermission) return;
+    // Deafened means silent regardless of what is held down.
+    if (this.#settings.deafen) return;
+
+    if (this.#pttReleaseTimer) {
+      clearTimeout(this.#pttReleaseTimer);
+      this.#pttReleaseTimer = undefined;
+    }
+
+    if (active) {
+      await this.#setTransmitting(true);
+      return;
+    }
+
+    const delay = this.#settings.pushToTalkReleaseDelay;
+    if (delay > 0) {
+      this.#pttReleaseTimer = setTimeout(() => {
+        this.#pttReleaseTimer = undefined;
+        this.#setTransmitting(false);
+      }, delay);
+    } else {
+      await this.#setTransmitting(false);
+    }
+  }
+
+  /**
+   * Bring the mic in line with the push-to-talk setting.
+   *
+   * When enabled the track stays published but muted, so a press only has to
+   * flip the mute flag. Call after connecting or after toggling the setting.
+   */
+  async applyPushToTalkMode() {
+    const room = this.room();
+    if (!room || !this.speakingPermission) return;
+
+    if (this.#settings.pushToTalk) {
+      if (!this.#micTrack()) {
+        await room.localParticipant.setMicrophoneEnabled(true);
+      }
+      await this.#setTransmitting(false);
+    } else if (this.#settings.micOn && !this.#settings.deafen) {
+      await this.#setTransmitting(true);
+    }
+
+    await this.syncPushToTalkBinding();
   }
 
   private onErr(e: unknown) {

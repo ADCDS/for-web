@@ -45,6 +45,13 @@ export interface TypeVoice {
   deafen: boolean;
   micOn: boolean;
 
+  /** Hold a key to transmit instead of leaving the mic open */
+  pushToTalk: boolean;
+  /** KeyboardEvent.code of the held key, e.g. "AltLeft" */
+  pushToTalkKey: string;
+  /** Keep transmitting for this long after release, so word endings survive */
+  pushToTalkReleaseDelay: number;
+
   userVolumes: Record<string, number>;
   userMutes: Record<string, boolean>;
 
@@ -86,6 +93,9 @@ export class Voice extends AbstractStore<"voice", TypeVoice> {
       outputVolume: 1.0,
       deafen: false,
       micOn: true,
+      pushToTalk: false,
+      pushToTalkKey: "AltLeft",
+      pushToTalkReleaseDelay: 200,
       userVolumes: {},
       userMutes: {},
       screenShareVolumes: {},
@@ -160,6 +170,22 @@ export class Voice extends AbstractStore<"voice", TypeVoice> {
 
     if (typeof input.micOn === "boolean") {
       data.micOn = input.micOn;
+    }
+
+    if (typeof input.pushToTalk === "boolean") {
+      data.pushToTalk = input.pushToTalk;
+    }
+
+    if (typeof input.pushToTalkKey === "string" && input.pushToTalkKey) {
+      data.pushToTalkKey = input.pushToTalkKey;
+    }
+
+    if (
+      typeof input.pushToTalkReleaseDelay === "number" &&
+      input.pushToTalkReleaseDelay >= 0 &&
+      input.pushToTalkReleaseDelay <= 2000
+    ) {
+      data.pushToTalkReleaseDelay = input.pushToTalkReleaseDelay;
     }
 
     if (typeof input.userVolumes === "object") {
@@ -360,6 +386,48 @@ export class Voice extends AbstractStore<"voice", TypeVoice> {
    */
   set deafen(value: boolean) {
     this.set("deafen", value);
+  }
+
+  /**
+   * Set whether push to talk is enabled
+   */
+  set pushToTalk(value: boolean) {
+    this.set("pushToTalk", value);
+  }
+
+  /**
+   * Set the push to talk key (a KeyboardEvent.code)
+   */
+  set pushToTalkKey(value: string) {
+    this.set("pushToTalkKey", value);
+  }
+
+  /**
+   * Set how long to keep transmitting after the key is released
+   */
+  set pushToTalkReleaseDelay(value: number) {
+    this.set("pushToTalkReleaseDelay", value);
+  }
+
+  /**
+   * Get whether push to talk is enabled
+   */
+  get pushToTalk(): boolean {
+    return this.get().pushToTalk;
+  }
+
+  /**
+   * Get the push to talk key
+   */
+  get pushToTalkKey(): string {
+    return this.get().pushToTalkKey;
+  }
+
+  /**
+   * Get the push to talk release delay in milliseconds
+   */
+  get pushToTalkReleaseDelay(): number {
+    return this.get().pushToTalkReleaseDelay;
   }
 
   /**

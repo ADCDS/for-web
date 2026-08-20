@@ -41,6 +41,18 @@ declare global {
         ) => void,
       ): void;
       screenPickerCallback(idx: number, audio: boolean): void;
+
+      /**
+       * Global (works while unfocused) push-to-talk, provided by the desktop
+       * shell. Absent in the browser and on desktop builds without a working
+       * key hook, in which case the renderer falls back to focused-only PTT.
+       */
+      pushToTalk?: {
+        /** Bind a KeyboardEvent.code; "" unbinds. Resolves false if unavailable. */
+        setBinding(code: string): Promise<boolean>;
+        /** Fires true on press, false on release. */
+        onChange(handler: (pressed: boolean) => void): void;
+      };
     };
 
     desktopConfig: {
