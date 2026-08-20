@@ -474,6 +474,28 @@ class Voice {
           Track.Source.ScreenShareAudio,
         );
 
+        // Verify macOS own-audio exclusion actually engaged.
+        //
+        // We ask for `restrictOwnAudio: true` above so Chromium builds the
+        // CoreAudio tap with initStereoGlobalTapButExcludeProcesses, keeping
+        // our own call playback out of the captured system audio. If that
+        // does not take effect, the capture silently includes everyone else's
+        // voices and listeners hear themselves echoed back -- with no error
+        // anywhere. The resulting deviceId is the only visible signal, so
+        // surface it rather than letting the regression pass unnoticed.
+        if (navigator.platform.startsWith("Mac") && screenAudioTrack?.track) {
+          const deviceId =
+            screenAudioTrack.track.mediaStreamTrack.getSettings().deviceId;
+          if (deviceId !== "loopbackWithoutChrome") {
+            console.error(
+              "[screenshare] own-audio exclusion NOT active: expected " +
+                `deviceId "loopbackWithoutChrome", got "${deviceId}". ` +
+                "Listeners will hear their own voices echoed back in the " +
+                "shared system audio.",
+            );
+          }
+        }
+
         this.#setScreenshare(room.localParticipant.isScreenShareEnabled);
 
         if (localTrack) {
