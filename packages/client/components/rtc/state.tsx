@@ -14,6 +14,7 @@ import {
 } from "solid-livekit-components";
 
 import {
+  LocalAudioTrack,
   Room,
   ScreenSharePresets,
   Track,
@@ -418,11 +419,85 @@ class Voice {
     return qualities;
   }
 
+  /**
+   * Find the desktop shell's PipeWire loopback source, if it exists.
+   *
+   * On Linux, `restrictOwnAudio` is silently ignored: Electron only swaps in
+   * Chromium's `loopbackWithoutChrome` device on mac/win/cros, and Chromium
+   * itself does not implement process exclusion for the PulseAudio/PipeWire
+   * backends. Plain `loopback` captures the default sink monitor, which
+   * includes our own call playback -- so everyone in the call hears themselves
+   * coming back through the screen share.
+   *
+   * The desktop shell already builds a virtual sink that every OTHER
+   * application's output is linked into, deliberately skipping our own
+   * processes. Capturing that gives the same "system audio minus us" mix that
+   * macOS gets from loopbackWithoutChrome.
+   */
+  async #findLoopbackSource(): Promise<string | undefined> {
+    if (!window.native) return undefined;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.find(
+        (device) =>
+          device.kind === "audioinput" &&
+          device.label.includes("stoat-virtual-source"),
+      )?.deviceId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Publish the loopback source as the screen share's audio track
+   */
+  async #publishLoopbackAudio(room: Room, deviceId: string) {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: { exact: deviceId },
+        // System audio, not a voice: leave it untouched.
+        autoGainControl: false,
+        echoCancellation: false,
+        noiseSuppression: false,
+      },
+    });
+
+    const [mediaStreamTrack] = stream.getAudioTracks();
+    if (!mediaStreamTrack) return;
+
+    await room.localParticipant.publishTrack(
+      new LocalAudioTrack(mediaStreamTrack),
+      { source: Track.Source.ScreenShareAudio },
+    );
+  }
+
+  /**
+   * Stop and unpublish the screen share audio track, if any.
+   *
+   * setScreenShareEnabled(false) only tears down what it published itself, so
+   * a hand-published loopback track would keep transmitting after the share
+   * ends -- which on a system-audio track means quietly broadcasting the rest
+   * of the call.
+   */
+  async #unpublishScreenAudio(room: Room) {
+    const publication = room.localParticipant.getTrackPublication(
+      Track.Source.ScreenShareAudio,
+    );
+    if (!publication?.track) return;
+    try {
+      publication.track.stop();
+      await room.localParticipant.unpublishTrack(publication.track);
+    } catch (e) {
+      this.onErr(e);
+    }
+  }
+
   async toggleScreenshare() {
     const room = this.room();
     if (!room) throw "invalid state";
 
     if (this.screenshare()) {
+      await this.#unpublishScreenAudio(room);
       await room.localParticipant.setScreenShareEnabled(false);
 
       this.#setScreenshare(room.localParticipant.isScreenShareEnabled);
@@ -459,6 +534,10 @@ class Voice {
         });
       }
 
+      // Prefer the shell's loopback source where it exists (Linux), because
+      // getDisplayMedia's own-audio exclusion does not work there.
+      const loopbackDeviceId = await this.#findLoopbackSource();
+
       try {
         const localTrack = await room.localParticipant.setScreenShareEnabled(
           true,
@@ -467,15 +546,26 @@ class Voice {
               this.getEnabledScreenShareQualities()[
                 this.#settings.screenShareQuality || "low"
               ]?.resolution,
-            audio: {
-              autoGainControl: false,
-              echoCancellation: false,
-              noiseSuppression: false,
-              voiceIsolation: false,
-              restrictOwnAudio: true,
-            },
+            audio: loopbackDeviceId
+              ? false
+              : {
+                  autoGainControl: false,
+                  echoCancellation: false,
+                  noiseSuppression: false,
+                  voiceIsolation: false,
+                  restrictOwnAudio: true,
+                },
           },
         );
+
+        if (loopbackDeviceId) {
+          try {
+            await this.#publishLoopbackAudio(room, loopbackDeviceId);
+          } catch (e) {
+            // Sharing without audio beats failing to share at all.
+            this.onErr(e);
+          }
+        }
 
         const screenAudioTrack = room.localParticipant.getTrackPublication(
           Track.Source.ScreenShareAudio,
