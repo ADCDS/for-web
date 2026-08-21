@@ -1,7 +1,102 @@
-const DEFAULT_API_URL =
-  (import.meta.env.DEV ? import.meta.env.VITE_DEV_API_URL : undefined) ??
-  (import.meta.env.VITE_API_URL as string) ??
-  "https://stoat.chat/api";
+import {
+  deriveMediaUrl,
+  deriveProxyUrl,
+  deriveWsUrl,
+  getStoredServerApiUrl,
+} from "./server";
+
+/**
+ * Pick the first usable value.
+ *
+ * Values are not just checked for null/undefined: the Docker image builds with
+ * `__VITE_X__` placeholders which `docker/inject.js` replaces with an empty
+ * string when the corresponding variable is not set at container startup, so
+ * blank values have to fall through to the next candidate as well.
+ *
+ * @param values Candidate values, in order of preference
+ * @returns First non-empty value
+ */
+function firstConfigured(...values: (string | undefined)[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+/**
+ * Server addresses baked in at build time.
+ */
+const ENV_API_URL = firstConfigured(
+  import.meta.env.DEV ? import.meta.env.VITE_DEV_API_URL : undefined,
+  import.meta.env.VITE_API_URL as string,
+  "https://stoat.chat/api",
+);
+
+const ENV_WS_URL = firstConfigured(
+  import.meta.env.DEV ? import.meta.env.VITE_DEV_WS_URL : undefined,
+  import.meta.env.VITE_WS_URL as string,
+  "wss://stoat.chat/events",
+);
+
+const ENV_MEDIA_URL = firstConfigured(
+  import.meta.env.DEV ? import.meta.env.VITE_DEV_MEDIA_URL : undefined,
+  import.meta.env.VITE_MEDIA_URL as string,
+  "https://cdn.stoatusercontent.com",
+);
+
+const ENV_PROXY_URL = firstConfigured(
+  import.meta.env.DEV ? import.meta.env.VITE_DEV_PROXY_URL : undefined,
+  import.meta.env.VITE_PROXY_URL as string,
+  "https://proxy.stoatusercontent.com",
+);
+
+/**
+ * Server the user picked at runtime, if any.
+ */
+const RUNTIME_API_URL = getStoredServerApiUrl();
+
+/**
+ * Whether we are talking to a server other than the build-time default.
+ *
+ * The official instance serves media and proxy from dedicated CDN hosts, so
+ * those addresses can only be derived from the API URL for other servers.
+ */
+const IS_CUSTOM_SERVER =
+  RUNTIME_API_URL !== undefined && RUNTIME_API_URL !== ENV_API_URL;
+
+const DEFAULT_API_URL = RUNTIME_API_URL ?? ENV_API_URL;
+
+/**
+ * Derive a companion URL, falling back to the build-time value.
+ *
+ * A bad override must never be able to take the whole app down, so any failure
+ * to parse the selected server just reverts to what was configured at build.
+ *
+ * @param derive Derivation to attempt
+ * @param fallback Build-time value
+ * @returns Derived URL, or the fallback
+ */
+function deriveOrFallback(
+  derive: (apiUrl: string) => string,
+  fallback: string,
+): string {
+  if (!IS_CUSTOM_SERVER) {
+    return fallback;
+  }
+
+  try {
+    return derive(DEFAULT_API_URL);
+  } catch {
+    return fallback;
+  }
+}
+
+const DEFAULT_WS_URL = deriveOrFallback(deriveWsUrl, ENV_WS_URL);
+const DEFAULT_MEDIA_URL = deriveOrFallback(deriveMediaUrl, ENV_MEDIA_URL);
+const DEFAULT_PROXY_URL = deriveOrFallback(deriveProxyUrl, ENV_PROXY_URL);
 
 export default {
   /**
@@ -24,26 +119,21 @@ export default {
     "https://stoat.chat/api",
   ].includes(DEFAULT_API_URL),
   /**
+   * Whether the user has selected a server other than the build-time default.
+   */
+  IS_CUSTOM_SERVER,
+  /**
    * What WS server to connect to by default.
    */
-  DEFAULT_WS_URL:
-    (import.meta.env.DEV ? import.meta.env.VITE_DEV_WS_URL : undefined) ??
-    (import.meta.env.VITE_WS_URL as string) ??
-    "wss://stoat.chat/events",
+  DEFAULT_WS_URL,
   /**
    * What media server to connect to by default.
    */
-  DEFAULT_MEDIA_URL:
-    (import.meta.env.DEV ? import.meta.env.VITE_DEV_MEDIA_URL : undefined) ??
-    (import.meta.env.VITE_MEDIA_URL as string) ??
-    "https://cdn.stoatusercontent.com",
+  DEFAULT_MEDIA_URL,
   /**
    * What proxy server to connect to by default.
    */
-  DEFAULT_PROXY_URL:
-    (import.meta.env.DEV ? import.meta.env.VITE_DEV_PROXY_URL : undefined) ??
-    (import.meta.env.VITE_PROXY_URL as string) ??
-    "https://proxy.stoatusercontent.com",
+  DEFAULT_PROXY_URL,
   /**
    * What gifbox server to connect to by default.
    */

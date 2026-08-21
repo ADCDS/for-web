@@ -10,6 +10,7 @@ import { IconButton, iconSize } from "@revolt/ui";
 
 import MdDarkMode from "@material-design-icons/svg/filled/dark_mode.svg?component-solid";
 
+import { ServerSelector } from "./ServerSelector";
 import background from "./background.jpg";
 import { FlowBase } from "./flows/Flow";
 import bluesky from "./flows/bluesky.svg";
@@ -134,7 +135,7 @@ export function AuthPage(props: { children: JSX.Element }) {
         css={{ scrollbar: "hidden" }}
       >
         <Nav>
-          <div />
+          <ServerSelector />
           <IconButton
             variant="tonal"
             onPress={() =>
