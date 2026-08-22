@@ -15,9 +15,11 @@ import {
 
 import {
   LocalAudioTrack,
+  LocalVideoTrack,
   Room,
   ScreenSharePresets,
   Track,
+  VideoEncoding,
   VideoResolution,
 } from "livekit-client";
 import { DenoiseTrackProcessor } from "livekit-rnnoise-processor";
@@ -45,7 +47,23 @@ type State =
 
 type ScreenShareQuality = {
   name: ScreenShareQualityName;
+  /** What to capture: constrains getDisplayMedia */
   resolution: VideoResolution;
+  /**
+   * What to send: constrains the RTP sender.
+   *
+   * Capture and encoding are separate settings and both have to be set.
+   * livekit's default screen-share encoding is h1080fps15 -- 15fps at
+   * 2.5Mbps -- so capturing 30fps without setting this just means every
+   * other frame is captured and thrown away.
+   */
+  encoding: VideoEncoding;
+  /**
+   * What to sacrifice when the encoder cannot keep up. livekit defaults screen
+   * shares to "maintain-resolution", which is right for reading a terminal and
+   * wrong for watching a game: it holds 1080p and drops frames instead.
+   */
+  degradationPreference: RTCDegradationPreference;
   fullName: string;
   contentHint: string;
 };
@@ -371,6 +389,8 @@ class Voice {
       low: {
         name: "low",
         resolution: ScreenSharePresets.h720fps30.resolution,
+        encoding: ScreenSharePresets.h720fps30.encoding,
+        degradationPreference: "maintain-framerate",
         fullName: `720p 30FPS`,
         contentHint: "motion",
       },
@@ -391,6 +411,8 @@ class Voice {
           qualities.high = {
             name: "high",
             resolution: ScreenSharePresets.h1080fps30.resolution,
+            encoding: ScreenSharePresets.h1080fps30.encoding,
+            degradationPreference: "maintain-framerate",
             fullName: `1080p 30FPS`,
             contentHint: "motion",
           };
@@ -418,6 +440,14 @@ class Voice {
           qualities.text = {
             name: "text",
             resolution: originalResolution,
+            // Source resolution at 5fps: spend the whole budget on detail, and
+            // when it cannot keep up drop frames rather than sharpness -- the
+            // opposite trade from the motion presets above.
+            encoding: {
+              ...ScreenSharePresets.original.encoding,
+              maxFramerate: 5,
+            },
+            degradationPreference: "maintain-resolution",
             fullName: `Source 5FPS`,
             contentHint: "text",
           };
@@ -425,6 +455,48 @@ class Voice {
       }
     }
     return qualities;
+  }
+
+  /**
+   * Point the encoder at the quality the user actually picked.
+   *
+   * `applyConstraints` only changes what gets captured; the RTP sender keeps
+   * whatever encoding it was published with. The picker runs after publish, so
+   * without this a stream picked as "1080p 30FPS" keeps the encoding derived
+   * from the stored preference -- and, when nothing was ever stored, livekit's
+   * own default of 15fps at 2.5Mbps. The capture then produces 30fps that the
+   * encoder throws half of away.
+   */
+  async #applyScreenShareEncoding(
+    track: LocalVideoTrack,
+    quality: ScreenShareQuality,
+  ) {
+    try {
+      await track.setDegradationPreference(quality.degradationPreference);
+
+      const sender = track.sender;
+      if (!sender) return;
+
+      const params = sender.getParameters();
+      if (!params.encodings?.length) return;
+
+      for (const encoding of params.encodings) {
+        // Disabled simulcast layers carry sentinel values; leave them alone.
+        if (encoding.active === false) continue;
+        // Lower layers are scaled-down copies, so give each its own share of
+        // the budget rather than the full-resolution figure.
+        const scale = encoding.scaleResolutionDownBy ?? 1;
+        encoding.maxFramerate = quality.encoding.maxFramerate;
+        encoding.maxBitrate = Math.round(
+          quality.encoding.maxBitrate / (scale * scale),
+        );
+      }
+
+      await sender.setParameters(params);
+    } catch (e) {
+      // A stream at the wrong framerate still beats no stream.
+      console.error("[screenshare] could not apply encoding", e);
+    }
   }
 
   /**
@@ -546,14 +618,17 @@ class Voice {
       // getDisplayMedia's own-audio exclusion does not work there.
       const loopbackDeviceId = await this.#findLoopbackSource();
 
+      // The desktop picker only reports its quality once getDisplayMedia has
+      // already resolved, so publish with the stored preference and correct
+      // the encoder afterwards in `callback` if the user chose differently.
+      const publishQuality =
+        qualities[this.#settings.screenShareQuality || "low"] ?? qualities.low!;
+
       try {
         const localTrack = await room.localParticipant.setScreenShareEnabled(
           true,
           {
-            resolution:
-              this.getEnabledScreenShareQualities()[
-                this.#settings.screenShareQuality || "low"
-              ]?.resolution,
+            resolution: publishQuality.resolution,
             audio: loopbackDeviceId
               ? false
               : {
@@ -563,6 +638,10 @@ class Voice {
                   voiceIsolation: false,
                   restrictOwnAudio: true,
                 },
+          },
+          {
+            screenShareEncoding: publishQuality.encoding,
+            degradationPreference: publishQuality.degradationPreference,
           },
         );
 
@@ -637,6 +716,10 @@ class Voice {
               });
               localTrack.videoTrack.mediaStreamTrack.contentHint =
                 quality.contentHint;
+              await this.#applyScreenShareEncoding(
+                localTrack.videoTrack,
+                quality,
+              );
               if (!audio && screenAudioTrack?.track) {
                 room.localParticipant.unpublishTrack(screenAudioTrack.track);
               }
