@@ -82,6 +82,10 @@ class Voice {
   showBar: Accessor<boolean>;
   #setShowBar: Setter<boolean>;
 
+  /** Whether the desktop shell is actually delivering global key events */
+  globalPushToTalk: Accessor<boolean>;
+  #setGlobalPushToTalk: Setter<boolean>;
+
   /** Pending push-to-talk release, so brief key bounces don't clip speech */
   #pttReleaseTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -115,6 +119,10 @@ class Voice {
 
     this.deafen = () => voiceSettings.deafen;
     this.microphone = () => voiceSettings.micOn && !voiceSettings.deafen;
+
+    const [globalPushToTalk, setGlobalPushToTalk] = createSignal(false);
+    this.globalPushToTalk = globalPushToTalk;
+    this.#setGlobalPushToTalk = setGlobalPushToTalk;
 
     this.#bindPushToTalk();
 
@@ -788,6 +796,11 @@ class Voice {
     window.native?.pushToTalk?.onChange((pressed) =>
       this.setPushToTalkActive(pressed),
     );
+
+    // Arm the global hook at startup rather than on the first call: the key
+    // has to be watched before the first press, and the settings page can only
+    // tell the truth about global capture once the shell has answered.
+    if (window.native?.pushToTalk) this.syncPushToTalkBinding();
   }
 
   /**
@@ -798,17 +811,31 @@ class Voice {
   }
 
   /**
-   * Ask the desktop shell to bind the configured key globally
+   * Ask the desktop shell to bind the configured key globally.
+   *
+   * The shell answers whether it could actually watch the key -- it says no
+   * when the backend is missing, the key is one it cannot map, or the OS
+   * withheld permission (macOS Accessibility). That answer is kept so the
+   * settings page can say which of "works everywhere" and "focused only" is
+   * true, instead of assuming the desktop app always manages it.
    */
   async syncPushToTalkBinding(): Promise<boolean> {
     const binding = window.native?.pushToTalk;
-    if (!binding) return false;
+    if (!binding) {
+      this.#setGlobalPushToTalk(false);
+      return false;
+    }
     try {
-      return await binding.setBinding(
+      const bound = await binding.setBinding(
         this.#settings.pushToTalk ? this.#settings.pushToTalkKey : "",
       );
+      // Unbinding reports whether the backend is alive, not whether we are
+      // armed, so only believe it when we asked for a key.
+      this.#setGlobalPushToTalk(this.#settings.pushToTalk && bound);
+      return bound;
     } catch (e) {
       this.onErr(e);
+      this.#setGlobalPushToTalk(false);
       return false;
     }
   }
@@ -881,6 +908,10 @@ class Voice {
    * flip the mute flag. Call after connecting or after toggling the setting.
    */
   async applyPushToTalkMode() {
+    // Bind first: the key hook has nothing to do with being in a call, and
+    // toggling the setting outside one still has to arm it (and report back).
+    await this.syncPushToTalkBinding();
+
     const room = this.room();
     if (!room || !this.speakingPermission) return;
 
@@ -892,8 +923,6 @@ class Voice {
     } else if (this.#settings.micOn && !this.#settings.deafen) {
       await this.#setTransmitting(true);
     }
-
-    await this.syncPushToTalkBinding();
   }
 
   private onErr(e: unknown) {

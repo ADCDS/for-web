@@ -1,4 +1,4 @@
-import { Show, createSignal, onCleanup } from "solid-js";
+import { Match, Show, Switch, createSignal, onCleanup } from "solid-js";
 
 import { Trans } from "@lingui-solid/solid/macro";
 
@@ -15,6 +15,46 @@ function prettyKey(code: string): string {
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);
   return code.replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
+const isMacOS = navigator.platform.startsWith("Mac");
+
+/**
+ * Say what push to talk will actually do on this machine.
+ *
+ * The desktop shell reports whether it could take the key globally, so the
+ * failures get named instead of being papered over with the optimistic
+ * "works everywhere" line: on macOS global capture needs Accessibility, and
+ * some keys have no mapping in the backend at all.
+ */
+function GlobalPushToTalkStatus() {
+  const { voice } = useState();
+  const rtc = useVoice();
+
+  return (
+    <Switch>
+      <Match when={!rtc.hasGlobalPushToTalk}>
+        <Trans>
+          Only works while Stoat is focused. Install the desktop app for push to
+          talk that works while playing a game.
+        </Trans>
+      </Match>
+      <Match when={!voice.pushToTalk || rtc.globalPushToTalk()}>
+        <Trans>Works even while another window is focused.</Trans>
+      </Match>
+      <Match when={isMacOS}>
+        <Trans>
+          Focused only for now: allow Stoat under System Settings → Privacy &
+          Security → Accessibility, then restart Stoat.
+        </Trans>
+      </Match>
+      <Match when={true}>
+        <Trans>
+          Focused only: this key cannot be captured globally, try another one.
+        </Trans>
+      </Match>
+    </Switch>
+  );
 }
 
 /**
@@ -70,19 +110,7 @@ export function PushToTalkOptions() {
             voice.pushToTalk = !voice.pushToTalk;
             rtc.applyPushToTalkMode();
           }}
-          description={
-            <Show
-              when={rtc.hasGlobalPushToTalk}
-              fallback={
-                <Trans>
-                  Only works while Stoat is focused. Install the desktop app for
-                  push to talk that works while playing a game.
-                </Trans>
-              }
-            >
-              <Trans>Works even while another window is focused.</Trans>
-            </Show>
-          }
+          description={<GlobalPushToTalkStatus />}
         >
           <Trans>Enable Push to Talk</Trans>
         </CategoryButton>
