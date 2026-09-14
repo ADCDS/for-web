@@ -3,6 +3,7 @@ import { Show } from "solid-js";
 import { useInstance } from "@revolt/instance";
 import { Column } from "@revolt/ui";
 
+import { PushToTalkOptions } from "./PushToTalkOptions";
 import { ScreenShareOptions } from "./ScreenShareOptions";
 import { VoiceInputOptions } from "./VoiceInputOptions";
 import { VoiceProcessingOptions } from "./VoiceProcessingOptions";
@@ -17,6 +18,7 @@ export function VoiceSettings() {
     <Column gap="lg">
       <VoiceInputOptions />
       <VoiceProcessingOptions />
+      <PushToTalkOptions />
       <Show when={limits().video}>
         <ScreenShareOptions />
       </Show>

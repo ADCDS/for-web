@@ -42,6 +42,12 @@ declare global {
       ): void;
       screenPickerCallback(idx: number, audio: boolean): void;
       isWayland?(): boolean;
+
+      /** Optional global desktop push-to-talk bridge. */
+      pushToTalk?: {
+        setBinding(code: string): Promise<boolean>;
+        onChange(handler: (pressed: boolean) => void): void;
+      };
     };
 
     desktopConfig: {

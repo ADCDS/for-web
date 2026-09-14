@@ -17,6 +17,17 @@ interface StoatPushNotification {
   url?: string;
 }
 
+// Take over as soon as a new worker is installed. The config asks for
+// registerType "autoUpdate", but that is inert under strategies:
+// "injectManifest" -- the worker's own code decides. Without this a new
+// worker sits in "waiting" until every client of the old one closes, and
+// the only UI that can send SKIP_WAITING lives in the Titlebar, so a crash
+// there leaves clients permanently pinned to a stale precached bundle.
+self.skipWaiting();
+self.addEventListener("activate", (event) => {
+  event.waitUntil(self.clients.claim());
+});
+
 self.addEventListener("message", (event) => {
   if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
 });

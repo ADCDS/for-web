@@ -15,10 +15,13 @@ import {
 } from "solid-livekit-components";
 
 import {
+  LocalAudioTrack,
   LocalTrackPublication,
+  LocalVideoTrack,
   Room,
   ScreenSharePresets,
   Track,
+  VideoEncoding,
   VideoResolution,
 } from "livekit-client";
 import { Channel } from "stoat.js";
@@ -49,6 +52,9 @@ type State =
 type ScreenShareQuality = {
   name: ScreenShareQualityName;
   resolution: VideoResolution;
+  /** Encoding and degradation controls prevent 30fps capture from being sent at LiveKit's 15fps default. */
+  encoding: VideoEncoding;
+  degradationPreference: RTCDegradationPreference;
   fullName: string;
   contentHint: string;
 };
@@ -85,6 +91,11 @@ class Voice {
   showBar: Accessor<boolean>;
   #setShowBar: Setter<boolean>;
 
+  /** Whether the desktop shell successfully bound the global PTT key. */
+  globalPushToTalk: Accessor<boolean>;
+  #setGlobalPushToTalk: Setter<boolean>;
+  #pttReleaseTimer: ReturnType<typeof setTimeout> | undefined;
+
   private sound: SoundController;
   private device: Device;
 
@@ -120,6 +131,11 @@ class Voice {
 
     this.deafen = () => voiceSettings.deafen;
     this.microphone = () => voiceSettings.micOn && !voiceSettings.deafen;
+
+    const [globalPushToTalk, setGlobalPushToTalk] = createSignal(false);
+    this.globalPushToTalk = globalPushToTalk;
+    this.#setGlobalPushToTalk = setGlobalPushToTalk;
+    this.#bindPushToTalk();
 
     const [video, setVideo] = createSignal(false);
     this.video = video;
@@ -250,6 +266,8 @@ class Voice {
           .setMicrophoneEnabled(this.#settings.micOn)
           .then((track) => {
             this.#settings.micOn = track != null;
+            // Keep the already-published track muted until the PTT key is held.
+            if (this.#settings.pushToTalk) void this.applyPushToTalkMode();
           });
       for (const p of room.remoteParticipants.values()) {
         const screenShareTrack = p.getTrackPublication(
@@ -427,6 +445,8 @@ class Voice {
       low: {
         name: "low",
         resolution: ScreenSharePresets.h720fps30.resolution,
+        encoding: ScreenSharePresets.h720fps30.encoding,
+        degradationPreference: "maintain-framerate",
         fullName: `720p 30FPS`,
         contentHint: "motion",
       },
@@ -442,6 +462,8 @@ class Voice {
       qualities.high = {
         name: "high",
         resolution: ScreenSharePresets.h1080fps30.resolution,
+        encoding: ScreenSharePresets.h1080fps30.encoding,
+        degradationPreference: "maintain-framerate",
         fullName: `1080p 30FPS`,
         contentHint: "motion",
       };
@@ -461,6 +483,11 @@ class Voice {
       qualities.text = {
         name: "text",
         resolution: originalResolution,
+        encoding: {
+          ...ScreenSharePresets.original.encoding,
+          maxFramerate: 5,
+        },
+        degradationPreference: "maintain-resolution",
         fullName: `Source 5FPS`,
         contentHint: "text",
       };
@@ -469,11 +496,83 @@ class Voice {
     return qualities;
   }
 
+  /** Apply the selected screen-share encoding after the desktop picker resolves. */
+  async #applyScreenShareEncoding(
+    track: LocalVideoTrack,
+    quality: ScreenShareQuality,
+  ) {
+    try {
+      await track.setDegradationPreference(quality.degradationPreference);
+      const sender = track.sender;
+      if (!sender) return;
+      const params = sender.getParameters();
+      if (!params.encodings?.length) return;
+      for (const encoding of params.encodings) {
+        if (encoding.active === false) continue;
+        const scale = encoding.scaleResolutionDownBy ?? 1;
+        encoding.maxFramerate = quality.encoding.maxFramerate;
+        encoding.maxBitrate = Math.round(
+          quality.encoding.maxBitrate / (scale * scale),
+        );
+      }
+      await sender.setParameters(params);
+    } catch (e) {
+      console.error("[screenshare] could not apply encoding", e);
+    }
+  }
+
+  /** Find the desktop shell's PipeWire loopback source, if available. */
+  async #findLoopbackSource(): Promise<string | undefined> {
+    if (!window.native) return undefined;
+    try {
+      return (await navigator.mediaDevices.enumerateDevices()).find(
+        (device) =>
+          device.kind === "audioinput" &&
+          device.label.includes("stoat-virtual-source"),
+      )?.deviceId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async #publishLoopbackAudio(room: Room, deviceId: string) {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: { exact: deviceId },
+        autoGainControl: false,
+        echoCancellation: false,
+        noiseSuppression: false,
+      },
+    });
+    const [mediaStreamTrack] = stream.getAudioTracks();
+    if (!mediaStreamTrack) return;
+    await room.localParticipant.publishTrack(
+      new LocalAudioTrack(mediaStreamTrack),
+      {
+        source: Track.Source.ScreenShareAudio,
+      },
+    );
+  }
+
+  async #unpublishScreenAudio(room: Room) {
+    const publication = room.localParticipant.getTrackPublication(
+      Track.Source.ScreenShareAudio,
+    );
+    if (!publication?.track) return;
+    try {
+      publication.track.stop();
+      await room.localParticipant.unpublishTrack(publication.track);
+    } catch (e) {
+      this.onErr(e);
+    }
+  }
+
   async toggleScreenshare() {
     const room = this.room();
     if (!room) throw "invalid state";
 
     if (this.screenshare()) {
+      await this.#unpublishScreenAudio(room);
       await room.localParticipant.setScreenShareEnabled(false);
 
       this.#setScreenshare(room.localParticipant.isScreenShareEnabled);
@@ -510,23 +609,42 @@ class Voice {
         });
       }
 
+      const loopbackDeviceId = await this.#findLoopbackSource();
+      // Electron reports the pick after capture begins; start native sharing at
+      // the highest permitted preset, then immediately apply the selection.
+      const publishQuality = window.native
+        ? (qualities.high ?? qualities.low!)
+        : (qualities[this.#settings.screenShareQuality || "low"] ??
+          qualities.low!);
+
       try {
         const localTrack = await room.localParticipant.setScreenShareEnabled(
           true,
           {
-            resolution:
-              this.getEnabledScreenShareQualities()[
-                this.#settings.screenShareQuality || "low"
-              ]?.resolution,
-            audio: {
-              autoGainControl: false,
-              echoCancellation: false,
-              noiseSuppression: false,
-              voiceIsolation: false,
-              restrictOwnAudio: true,
-            },
+            resolution: publishQuality.resolution,
+            audio: loopbackDeviceId
+              ? false
+              : {
+                  autoGainControl: false,
+                  echoCancellation: false,
+                  noiseSuppression: false,
+                  voiceIsolation: false,
+                  restrictOwnAudio: true,
+                },
+          },
+          {
+            screenShareEncoding: publishQuality.encoding,
+            degradationPreference: publishQuality.degradationPreference,
           },
         );
+
+        if (loopbackDeviceId) {
+          try {
+            await this.#publishLoopbackAudio(room, loopbackDeviceId);
+          } catch (e) {
+            this.onErr(e);
+          }
+        }
 
         const screenAudioTrack = room.localParticipant.getTrackPublication(
           Track.Source.ScreenShareAudio,
@@ -574,6 +692,10 @@ class Voice {
               });
               localTrack.videoTrack.mediaStreamTrack.contentHint =
                 quality.contentHint;
+              await this.#applyScreenShareEncoding(
+                localTrack.videoTrack,
+                quality,
+              );
               if (!audio && screenAudioTrack?.track) {
                 room.localParticipant.unpublishTrack(screenAudioTrack.track);
               }
@@ -686,6 +808,187 @@ class Voice {
 
   get speakingPermission() {
     return !!this.channel()?.havePermission("Speak");
+  }
+
+  /**
+   * Wire up push-to-talk input sources.
+   *
+   * Two of them: DOM key events, which only fire while the app is focused, and
+   * an optional hook from the desktop shell that works globally (while a game
+   * has focus). Both funnel into setPushToTalkActive, which is idempotent, so
+   * it is fine for both to fire for the same press.
+   *
+   * Attached once for the lifetime of the app rather than per call: the
+   * handlers no-op unless push-to-talk is enabled and a room is connected.
+   */
+  #bindPushToTalk() {
+    if (typeof window === "undefined") return;
+
+    const isTyping = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null;
+      if (!el) return false;
+      return (
+        el.isContentEditable ||
+        el.tagName === "INPUT" ||
+        el.tagName === "TEXTAREA" ||
+        el.tagName === "SELECT"
+      );
+    };
+
+    window.addEventListener("keydown", (event) => {
+      if (!this.#settings.pushToTalk) return;
+      if (event.code !== this.#settings.pushToTalkKey) return;
+      // Holding a key autorepeats; only the first press matters.
+      if (event.repeat) return;
+      // Don't swallow the key while someone is writing a message.
+      if (isTyping(event.target)) return;
+      this.setPushToTalkActive(true);
+    });
+
+    window.addEventListener("keyup", (event) => {
+      if (!this.#settings.pushToTalk) return;
+      if (event.code !== this.#settings.pushToTalkKey) return;
+      this.setPushToTalkActive(false);
+    });
+
+    // If focus is lost mid-press the keyup never arrives and the mic would
+    // stay open indefinitely -- exactly the situation push-to-talk exists to
+    // prevent. Alt-tabbing into a game does this every time.
+    window.addEventListener("blur", () => {
+      if (!this.#settings.pushToTalk) return;
+      this.setPushToTalkActive(false);
+    });
+
+    window.native?.pushToTalk?.onChange((pressed) =>
+      this.setPushToTalkActive(pressed),
+    );
+
+    // Arm the global hook at startup rather than on the first call: the key
+    // has to be watched before the first press, and the settings page can only
+    // tell the truth about global capture once the shell has answered.
+    if (window.native?.pushToTalk) this.syncPushToTalkBinding();
+  }
+
+  /**
+   * Whether the desktop shell can deliver key events while unfocused
+   */
+  get hasGlobalPushToTalk(): boolean {
+    return !!window.native?.pushToTalk;
+  }
+
+  /**
+   * Ask the desktop shell to bind the configured key globally.
+   *
+   * The shell answers whether it could actually watch the key -- it says no
+   * when the backend is missing, the key is one it cannot map, or the OS
+   * withheld permission (macOS Accessibility). That answer is kept so the
+   * settings page can say which of "works everywhere" and "focused only" is
+   * true, instead of assuming the desktop app always manages it.
+   */
+  async syncPushToTalkBinding(): Promise<boolean> {
+    const binding = window.native?.pushToTalk;
+    if (!binding) {
+      this.#setGlobalPushToTalk(false);
+      return false;
+    }
+    try {
+      const bound = await binding.setBinding(
+        this.#settings.pushToTalk ? this.#settings.pushToTalkKey : "",
+      );
+      // Unbinding reports whether the backend is alive, not whether we are
+      // armed, so only believe it when we asked for a key.
+      this.#setGlobalPushToTalk(this.#settings.pushToTalk && bound);
+      return bound;
+    } catch (e) {
+      this.onErr(e);
+      this.#setGlobalPushToTalk(false);
+      return false;
+    }
+  }
+
+  /**
+   * The published microphone track, if there is one
+   */
+  #micTrack() {
+    return this.room()?.localParticipant.getTrackPublication(
+      Track.Source.Microphone,
+    )?.track;
+  }
+
+  /**
+   * Start or stop transmitting.
+   *
+   * Mutes the already-published track rather than going through
+   * setMicrophoneEnabled, which renegotiates -- far too slow to sit between
+   * pressing a key and the first syllable.
+   */
+  async #setTransmitting(on: boolean) {
+    try {
+      const track = this.#micTrack();
+      if (!track) {
+        // Nothing published yet (e.g. mic was hard-muted). Publishing on the
+        // first press is slower but better than dropping the press entirely.
+        if (on) await this.room()?.localParticipant.setMicrophoneEnabled(true);
+        return;
+      }
+      await (on ? track.unmute() : track.mute());
+    } catch (e) {
+      this.onErr(e);
+    }
+  }
+
+  /**
+   * Called on key press (true) and release (false)
+   */
+  async setPushToTalkActive(active: boolean) {
+    if (!this.#settings.pushToTalk) return;
+    if (!this.room() || !this.speakingPermission) return;
+    // Deafened means silent regardless of what is held down.
+    if (this.#settings.deafen) return;
+
+    if (this.#pttReleaseTimer) {
+      clearTimeout(this.#pttReleaseTimer);
+      this.#pttReleaseTimer = undefined;
+    }
+
+    if (active) {
+      await this.#setTransmitting(true);
+      return;
+    }
+
+    const delay = this.#settings.pushToTalkReleaseDelay;
+    if (delay > 0) {
+      this.#pttReleaseTimer = setTimeout(() => {
+        this.#pttReleaseTimer = undefined;
+        this.#setTransmitting(false);
+      }, delay);
+    } else {
+      await this.#setTransmitting(false);
+    }
+  }
+
+  /**
+   * Bring the mic in line with the push-to-talk setting.
+   *
+   * When enabled the track stays published but muted, so a press only has to
+   * flip the mute flag. Call after connecting or after toggling the setting.
+   */
+  async applyPushToTalkMode() {
+    // Bind first: the key hook has nothing to do with being in a call, and
+    // toggling the setting outside one still has to arm it (and report back).
+    await this.syncPushToTalkBinding();
+
+    const room = this.room();
+    if (!room || !this.speakingPermission) return;
+
+    if (this.#settings.pushToTalk) {
+      if (!this.#micTrack()) {
+        await room.localParticipant.setMicrophoneEnabled(true);
+      }
+      await this.#setTransmitting(false);
+    } else if (this.#settings.micOn && !this.#settings.deafen) {
+      await this.#setTransmitting(true);
+    }
   }
 
   private onErr(e: unknown) {
