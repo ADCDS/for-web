@@ -621,8 +621,15 @@ class Voice {
       // The desktop picker only reports its quality once getDisplayMedia has
       // already resolved, so publish with the stored preference and correct
       // the encoder afterwards in `callback` if the user chose differently.
-      const publishQuality =
-        qualities[this.#settings.screenShareQuality || "low"] ?? qualities.low!;
+      // Electron's desktop picker reports its chosen quality only after
+      // getDisplayMedia has resolved. Capture at the highest available preset
+      // first so a subsequently selected 1080p quality is not irreversibly
+      // limited to the stored (usually 720p) default. The picker callback
+      // immediately applies the selected lower preset when appropriate.
+      const publishQuality = window.native
+        ? (qualities.high ?? qualities.low!)
+        : (qualities[this.#settings.screenShareQuality || "low"] ??
+          qualities.low!);
 
       try {
         const localTrack = await room.localParticipant.setScreenShareEnabled(
